@@ -532,6 +532,7 @@ jobs:
 
       - name: Run desktop tests
         if: ${{ matrix.spec.test && matrix.spec.os != 'ubuntu-latest' }}
+        shell: bash
         run: yarn workspace @affine-test/affine-desktop e2e
 
       - name: Make bundle
