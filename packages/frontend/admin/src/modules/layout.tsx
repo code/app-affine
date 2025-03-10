@@ -139,7 +139,9 @@ export function Layout({ children }: PropsWithChildren) {
                 {children}
               </ResizablePanel>
               <RightPanel
-                rightPanelRef={rightPanelRef}
+                rightPanelRef={
+                  rightPanelRef as RefObject<ImperativePanelHandle>
+                }
                 onExpand={handleExpand}
                 onCollapse={handleCollapse}
               />
@@ -241,7 +243,7 @@ export const RightPanel = ({
 
   return (
     <>
-      <ResizableHandle />
+      {isOpen ? <ResizableHandle /> : null}
       <ResizablePanel
         id="1"
         order={1}
