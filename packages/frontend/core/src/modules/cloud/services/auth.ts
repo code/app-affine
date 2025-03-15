@@ -1,28 +1,20 @@
-import { AIProvider } from '@affine/core/blocksuite/presets/ai';
-import { appInfo } from '@affine/electron-api';
+import { AIProvider } from '@affine/core/blocksuite/ai';
+import { UserFriendlyError } from '@affine/error';
 import type { OAuthProviderType } from '@affine/graphql';
-import {
-  ApplicationFocused,
-  ApplicationStarted,
-  createEvent,
-  OnEvent,
-  Service,
-} from '@toeverything/infra';
+import { track } from '@affine/track';
+import { OnEvent, Service } from '@toeverything/infra';
+import { nanoid } from 'nanoid';
 import { distinctUntilChanged, map, skip } from 'rxjs';
 
+import { ApplicationFocused } from '../../lifecycle';
+import type { UrlService } from '../../url';
 import { type AuthAccountInfo, AuthSession } from '../entities/session';
+import { AccountChanged } from '../events/account-changed';
+import { AccountLoggedIn } from '../events/account-logged-in';
+import { AccountLoggedOut } from '../events/account-logged-out';
+import { ServerStarted } from '../events/server-started';
 import type { AuthStore } from '../stores/auth';
 import type { FetchService } from './fetch';
-
-// Emit when account changed
-export const AccountChanged = createEvent<AuthAccountInfo | null>(
-  'AccountChanged'
-);
-
-export const AccountLoggedIn = createEvent<AuthAccountInfo>('AccountLoggedIn');
-
-export const AccountLoggedOut =
-  createEvent<AuthAccountInfo>('AccountLoggedOut');
 
 function toAIUserInfo(account: AuthAccountInfo | null) {
   if (!account) return null;
@@ -34,17 +26,19 @@ function toAIUserInfo(account: AuthAccountInfo | null) {
   };
 }
 
-@OnEvent(ApplicationStarted, e => e.onApplicationStart)
 @OnEvent(ApplicationFocused, e => e.onApplicationFocused)
+@OnEvent(ServerStarted, e => e.onServerStarted)
 export class AuthService extends Service {
   session = this.framework.createEntity(AuthSession);
 
   constructor(
     private readonly fetchService: FetchService,
-    private readonly store: AuthStore
+    private readonly store: AuthStore,
+    private readonly urlService: UrlService
   ) {
     super();
 
+    // TODO(@forehalo): make AIProvider a standalone service passed to AI elements by props
     AIProvider.provide('userInfo', () => {
       return toAIUserInfo(this.session.account$.value);
     });
@@ -59,17 +53,18 @@ export class AuthService extends Service {
         skip(1) // skip the initial value
       )
       .subscribe(({ account }) => {
+        AIProvider.slots.userInfo.next(toAIUserInfo(account));
+
         if (account === null) {
           this.eventBus.emit(AccountLoggedOut, account);
         } else {
           this.eventBus.emit(AccountLoggedIn, account);
         }
         this.eventBus.emit(AccountChanged, account);
-        AIProvider.slots.userInfo.emit(toAIUserInfo(account));
       });
   }
 
-  private onApplicationStart() {
+  private onServerStarted() {
     this.session.revalidate();
   }
 
@@ -79,35 +74,58 @@ export class AuthService extends Service {
 
   async sendEmailMagicLink(
     email: string,
-    verifyToken: string,
-    challenge?: string
+    verifyToken?: string,
+    challenge?: string,
+    redirectUrl?: string // url to redirect to after signed-in
   ) {
-    const res = await this.fetchService.fetch('/api/auth/sign-in', {
-      method: 'POST',
-      body: JSON.stringify({
-        email,
-        // we call it [callbackUrl] instead of [redirect_uri]
-        // to make it clear the url is used to finish the sign-in process instead of redirect after signed-in
-        callbackUrl: `/magic-link?client=${environment.isElectron ? appInfo?.schema : 'web'}`,
-      }),
-      headers: {
-        'content-type': 'application/json',
-        ...this.captchaHeaders(verifyToken, challenge),
-      },
-    });
-    if (!res.ok) {
-      throw new Error('Failed to send email');
+    track.$.$.auth.signIn({ method: 'magic-link' });
+    this.setClientNonce();
+    try {
+      const scheme = this.urlService.getClientScheme();
+      const magicLinkUrlParams = new URLSearchParams();
+      if (redirectUrl) {
+        magicLinkUrlParams.set('redirect_uri', redirectUrl);
+      }
+      if (scheme) {
+        magicLinkUrlParams.set('client', scheme);
+      }
+      await this.fetchService.fetch('/api/auth/sign-in', {
+        method: 'POST',
+        body: JSON.stringify({
+          email,
+          // we call it [callbackUrl] instead of [redirect_uri]
+          // to make it clear the url is used to finish the sign-in process instead of redirect after signed-in
+          callbackUrl: `/magic-link?${magicLinkUrlParams.toString()}`,
+          client_nonce: this.store.getClientNonce(),
+        }),
+        headers: {
+          'content-type': 'application/json',
+          ...(verifyToken ? this.captchaHeaders(verifyToken, challenge) : {}),
+        },
+      });
+    } catch (e) {
+      track.$.$.auth.signInFail({
+        method: 'magic-link',
+        reason: UserFriendlyError.fromAny(e).name,
+      });
+      throw e;
     }
   }
 
-  async signInMagicLink(email: string, token: string) {
-    await this.fetchService.fetch('/api/auth/magic-link', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ email, token }),
-    });
+  async signInMagicLink(email: string, token: string, byLink = true) {
+    const method = byLink ? 'magic-link' : 'otp';
+    try {
+      await this.store.signInMagicLink(email, token);
+
+      this.session.revalidate();
+      track.$.$.auth.signedIn({ method });
+    } catch (e) {
+      track.$.$.auth.signInFail({
+        method,
+        reason: UserFriendlyError.fromAny(e).name,
+      });
+      throw e;
+    }
   }
 
   async oauthPreflight(
@@ -115,65 +133,78 @@ export class AuthService extends Service {
     client: string,
     /** @deprecated*/ redirectUrl?: string
   ) {
-    const res = await this.fetchService.fetch('/api/oauth/preflight', {
-      method: 'POST',
-      body: JSON.stringify({ provider, redirect_uri: redirectUrl }),
-      headers: {
-        'content-type': 'application/json',
-      },
-    });
+    this.setClientNonce();
+    try {
+      const res = await this.fetchService.fetch('/api/oauth/preflight', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider,
+          client,
+          redirect_uri: redirectUrl,
+          client_nonce: this.store.getClientNonce(),
+        }),
+        headers: {
+          'content-type': 'application/json',
+        },
+      });
 
-    let { url } = await res.json();
+      let { url } = await res.json();
 
-    // change `state=xxx` to `state={state:xxx,native:true}`
-    // so we could know the callback should be redirect to native app
-    const oauthUrl = new URL(url);
-    oauthUrl.searchParams.set(
-      'state',
-      JSON.stringify({
-        state: oauthUrl.searchParams.get('state'),
-        client,
-      })
-    );
-    url = oauthUrl.toString();
-
-    return url;
+      return url as string;
+    } catch (e) {
+      track.$.$.auth.signInFail({
+        method: 'oauth',
+        provider,
+        reason: UserFriendlyError.fromAny(e).name,
+      });
+      throw e;
+    }
   }
 
-  async signInOauth(code: string, state: string) {
-    const res = await this.fetchService.fetch('/api/oauth/callback', {
-      method: 'POST',
-      body: JSON.stringify({ code, state }),
-      headers: {
-        'content-type': 'application/json',
-      },
-    });
+  async signInOauth(code: string, state: string, provider: string) {
+    try {
+      const { redirectUri } = await this.store.signInOauth(
+        code,
+        state,
+        provider
+      );
 
-    return await res.json();
+      this.session.revalidate();
+
+      track.$.$.auth.signedIn({ method: 'oauth', provider });
+      return { redirectUri };
+    } catch (e) {
+      track.$.$.auth.signInFail({
+        method: 'oauth',
+        provider,
+        reason: UserFriendlyError.fromAny(e).name,
+      });
+      throw e;
+    }
   }
 
   async signInPassword(credential: {
     email: string;
     password: string;
-    verifyToken: string;
+    verifyToken?: string;
     challenge?: string;
   }) {
-    const res = await this.fetchService.fetch('/api/auth/sign-in', {
-      method: 'POST',
-      body: JSON.stringify(credential),
-      headers: {
-        'content-type': 'application/json',
-        ...this.captchaHeaders(credential.verifyToken, credential.challenge),
-      },
-    });
-    if (!res.ok) {
-      throw new Error('Failed to sign in');
+    track.$.$.auth.signIn({ method: 'password' });
+    try {
+      await this.store.signInPassword(credential);
+      this.session.revalidate();
+      track.$.$.auth.signedIn({ method: 'password' });
+    } catch (e) {
+      track.$.$.auth.signInFail({
+        method: 'password',
+        reason: UserFriendlyError.fromAny(e).name,
+      });
+      throw e;
     }
-    this.session.revalidate();
   }
 
   async signOut() {
-    await this.fetchService.fetch('/api/auth/sign-out');
+    await this.store.signOut();
     this.store.setCachedAuthSession(null);
     this.session.revalidate();
   }
@@ -192,5 +223,12 @@ export class AuthService extends Service {
     }
 
     return headers;
+  }
+
+  private setClientNonce() {
+    if (BUILD_CONFIG.isNative) {
+      // send random client nonce on native app
+      this.store.setClientNonce(nanoid());
+    }
   }
 }

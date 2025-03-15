@@ -1,10 +1,17 @@
 import './config';
 
 import { ServerFeature } from '../../core/config';
+import { DocStorageModule } from '../../core/doc';
 import { FeatureModule } from '../../core/features';
 import { PermissionModule } from '../../core/permission';
 import { QuotaModule } from '../../core/quota';
 import { Plugin } from '../registry';
+import {
+  CopilotContextDocJob,
+  CopilotContextResolver,
+  CopilotContextRootResolver,
+  CopilotContextService,
+} from './context';
 import { CopilotController } from './controller';
 import { ChatMessageCache } from './message';
 import { PromptService } from './prompt';
@@ -13,6 +20,7 @@ import {
   CopilotProviderService,
   FalProvider,
   OpenAIProvider,
+  PerplexityProvider,
   registerCopilotProvider,
 } from './providers';
 import {
@@ -26,10 +34,11 @@ import { CopilotWorkflowExecutors, CopilotWorkflowService } from './workflow';
 
 registerCopilotProvider(FalProvider);
 registerCopilotProvider(OpenAIProvider);
+registerCopilotProvider(PerplexityProvider);
 
 @Plugin({
   name: 'copilot',
-  imports: [FeatureModule, QuotaModule, PermissionModule],
+  imports: [DocStorageModule, FeatureModule, QuotaModule, PermissionModule],
   providers: [
     ChatSessionService,
     CopilotResolver,
@@ -39,13 +48,19 @@ registerCopilotProvider(OpenAIProvider);
     CopilotProviderService,
     CopilotStorage,
     PromptsManagementResolver,
+    // workflow
     CopilotWorkflowService,
     ...CopilotWorkflowExecutors,
+    // context
+    CopilotContextRootResolver,
+    CopilotContextResolver,
+    CopilotContextService,
+    CopilotContextDocJob,
   ],
   controllers: [CopilotController],
   contributesTo: ServerFeature.Copilot,
   if: config => {
-    if (config.flavor.graphql) {
+    if (config.flavor.graphql || config.flavor.doc) {
       return assertProvidersConfigs(config);
     }
     return false;

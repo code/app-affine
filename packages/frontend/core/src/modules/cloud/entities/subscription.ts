@@ -1,7 +1,10 @@
-import { type SubscriptionQuery, SubscriptionRecurring } from '@affine/graphql';
-import { SubscriptionPlan } from '@affine/graphql';
 import {
-  backoffRetry,
+  SubscriptionPlan,
+  type SubscriptionQuery,
+  SubscriptionRecurring,
+  SubscriptionVariant,
+} from '@affine/graphql';
+import {
   catchErrorInto,
   effect,
   Entity,
@@ -10,12 +13,12 @@ import {
   LiveData,
   onComplete,
   onStart,
+  smartRetry,
 } from '@toeverything/infra';
 import { EMPTY, map, mergeMap } from 'rxjs';
 
-import { isBackendError, isNetworkError } from '../error';
 import type { AuthService } from '../services/auth';
-import type { ServerConfigService } from '../services/server-config';
+import type { ServerService } from '../services/server';
 import type { SubscriptionStore } from '../stores/subscription';
 
 export type SubscriptionType = NonNullable<
@@ -41,10 +44,16 @@ export class Subscription extends Entity {
   isBeliever$ = this.pro$.map(
     sub => sub?.recurring === SubscriptionRecurring.Lifetime
   );
+  isOnetimePro$ = this.pro$.map(
+    sub => sub?.variant === SubscriptionVariant.Onetime
+  );
+  isOnetimeAI$ = this.ai$.map(
+    sub => sub?.variant === SubscriptionVariant.Onetime
+  );
 
   constructor(
     private readonly authService: AuthService,
-    private readonly serverConfigService: ServerConfigService,
+    private readonly serverService: ServerService,
     private readonly store: SubscriptionStore
   ) {
     super();
@@ -90,9 +99,7 @@ export class Subscription extends Entity {
           }
 
           const serverConfig =
-            await this.serverConfigService.serverConfig.features$.waitForNonNull(
-              signal
-            );
+            await this.serverService.server.features$.waitForNonNull(signal);
 
           if (!serverConfig.payment) {
             // No payment feature, no subscription
@@ -114,13 +121,7 @@ export class Subscription extends Entity {
             subscriptions: subscriptions,
           };
         }).pipe(
-          backoffRetry({
-            when: isNetworkError,
-            count: Infinity,
-          }),
-          backoffRetry({
-            when: isBackendError,
-          }),
+          smartRetry(),
           mergeMap(data => {
             if (data) {
               this.store.setCachedSubscriptions(

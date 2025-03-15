@@ -8,7 +8,9 @@ import type { ChatPrompt } from './prompt';
 export enum AvailableModels {
   // text to text
   Gpt4Omni = 'gpt-4o',
+  Gpt4Omni0806 = 'gpt-4o-2024-08-06',
   Gpt4OmniMini = 'gpt-4o-mini',
+  Gpt4OmniMini0718 = 'gpt-4o-mini-2024-07-18',
   // embeddings
   TextEmbedding3Large = 'text-embedding-3-large',
   TextEmbedding3Small = 'text-embedding-3-small',
@@ -48,10 +50,7 @@ export const ChatMessageRole = Object.values(AiPromptRole) as [
 const PureMessageSchema = z.object({
   content: z.string(),
   attachments: z.array(z.string()).optional().nullable(),
-  params: z
-    .record(z.union([z.string(), z.array(z.string()), z.record(z.any())]))
-    .optional()
-    .nullable(),
+  params: z.record(z.any()).optional().nullable(),
 });
 
 export const PromptMessageSchema = PureMessageSchema.extend({
@@ -102,7 +101,7 @@ export type SubmittedMessage = z.infer<typeof SubmittedMessageSchema>;
 export const ChatHistorySchema = z
   .object({
     sessionId: z.string(),
-    action: z.string().optional(),
+    action: z.string().nullable(),
     tokens: z.number(),
     messages: z.array(PromptMessageSchema.or(ChatMessageSchema)),
     createdAt: z.date(),
@@ -118,6 +117,11 @@ export interface ChatSessionOptions {
   userId: string;
   workspaceId: string;
   docId: string;
+  promptName: string;
+}
+
+export interface ChatSessionPromptUpdateOptions
+  extends Pick<ChatSessionState, 'sessionId' | 'userId'> {
   promptName: string;
 }
 
@@ -145,6 +149,7 @@ export type ListHistoriesOptions = {
   sessionOrder: 'asc' | 'desc' | undefined;
   messageOrder: 'asc' | 'desc' | undefined;
   sessionId: string | undefined;
+  withPrompt: boolean | undefined;
 };
 
 // ======== Provider Interface ========
@@ -152,6 +157,7 @@ export type ListHistoriesOptions = {
 export enum CopilotProviderType {
   FAL = 'fal',
   OpenAI = 'openai',
+  Perplexity = 'perplexity',
   // only for test
   Test = 'test',
 }
@@ -192,6 +198,13 @@ const CopilotImageOptionsSchema = CopilotProviderOptionsSchema.merge(
   .optional();
 
 export type CopilotImageOptions = z.infer<typeof CopilotImageOptionsSchema>;
+
+export type CopilotContextFile = {
+  id: string; // fileId
+  created_at: number;
+  // embedding status
+  status: 'in_progress' | 'completed' | 'failed';
+};
 
 export interface CopilotProvider {
   readonly type: CopilotProviderType;

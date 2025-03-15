@@ -10,7 +10,13 @@ query adminServerConfig {
     type
     initialized
     credentialsRequirement {
-      ...CredentialsRequirement
+      ...CredentialsRequirements
+    }
+    availableUpgrade {
+      changelog
+      version
+      publishedAt
+      url
     }
     availableUserFeatures
   }

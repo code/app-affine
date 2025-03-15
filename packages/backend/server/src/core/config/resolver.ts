@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import {
   Args,
   Field,
@@ -12,11 +13,11 @@ import {
 import { RuntimeConfig, RuntimeConfigType } from '@prisma/client';
 import { GraphQLJSON, GraphQLJSONObject } from 'graphql-scalars';
 
-import { Config, URLHelper } from '../../fundamentals';
+import { Config, Runtime, URLHelper } from '../../base';
+import { Feature } from '../../models';
 import { Public } from '../auth';
 import { Admin } from '../common';
-import { FeatureType } from '../features';
-import { AvailableUserFeatureConfig } from '../features/resolver';
+import { AvailableUserFeatureConfig } from '../features';
 import { ServerFlags } from './config';
 import { ENABLED_FEATURES } from './server-feature';
 import { ServerService } from './service';
@@ -39,6 +40,27 @@ export class CredentialsRequirementType {
 registerEnumType(RuntimeConfigType, {
   name: 'RuntimeConfigType',
 });
+
+@ObjectType()
+export class ReleaseVersionType {
+  @Field()
+  version!: string;
+
+  @Field()
+  url!: string;
+
+  @Field(() => GraphQLISODateTime)
+  publishedAt!: Date;
+
+  @Field()
+  changelog!: string;
+}
+
+const RELEASE_CHANNEL_MAP = new Map<Config['AFFINE_ENV'], string>([
+  ['dev', 'canary'],
+  ['beta', 'beta'],
+  ['production', 'stable'],
+]);
 @ObjectType()
 export class ServerRuntimeConfigType implements Partial<RuntimeConfig> {
   @Field()
@@ -74,8 +96,11 @@ export class ServerFlagsType implements ServerFlags {
 
 @Resolver(() => ServerConfigType)
 export class ServerConfigResolver {
+  private readonly logger = new Logger(ServerConfigResolver.name);
+
   constructor(
     private readonly config: Config,
+    private readonly runtime: Runtime,
     private readonly url: URLHelper,
     private readonly server: ServerService
   ) {}
@@ -103,7 +128,7 @@ export class ServerConfigResolver {
     description: 'credentials requirement',
   })
   async credentialsRequirement() {
-    const config = await this.config.runtime.fetchAll({
+    const config = await this.runtime.fetchAll({
       'auth/password.max': true,
       'auth/password.min': true,
     });
@@ -120,7 +145,7 @@ export class ServerConfigResolver {
     description: 'server flags',
   })
   async flags(): Promise<ServerFlagsType> {
-    const records = await this.config.runtime.list('flags');
+    const records = await this.runtime.list('flags');
 
     return records.reduce((flags, record) => {
       flags[record.key as keyof ServerFlagsType] = record.value as any;
@@ -134,15 +159,58 @@ export class ServerConfigResolver {
   async initialized() {
     return this.server.initialized();
   }
+
+  @ResolveField(() => ReleaseVersionType, {
+    description: 'fetch latest available upgradable release of server',
+  })
+  async availableUpgrade(): Promise<ReleaseVersionType | null> {
+    const channel = RELEASE_CHANNEL_MAP.get(this.config.AFFINE_ENV) ?? 'stable';
+    const url = `https://affine.pro/api/worker/releases?channel=${channel}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-cache',
+        },
+      });
+
+      if (!response.ok) {
+        this.logger.error(
+          'failed to fetch affine releases',
+          await response.text()
+        );
+        return null;
+      }
+      const releases = (await response.json()) as Array<{
+        name: string;
+        url: string;
+        body: string;
+        published_at: string;
+      }>;
+
+      const latest = releases.at(0);
+      if (!latest || latest.name === this.config.version) {
+        return null;
+      }
+
+      return {
+        version: latest.name,
+        url: latest.url,
+        changelog: latest.body,
+        publishedAt: new Date(latest.published_at),
+      };
+    } catch (e) {
+      this.logger.error('failed to fetch affine releases', e);
+      return null;
+    }
+  }
 }
 
 @Resolver(() => ServerConfigType)
 export class ServerFeatureConfigResolver extends AvailableUserFeatureConfig {
-  constructor(config: Config) {
-    super(config);
-  }
-
-  @ResolveField(() => [FeatureType], {
+  @ResolveField(() => [Feature], {
     description: 'Features for user that can be configured',
   })
   override availableUserFeatures() {
@@ -184,13 +252,13 @@ interface ServerDatabaseConfig {
 @Admin()
 @Resolver(() => ServerRuntimeConfigType)
 export class ServerRuntimeConfigResolver {
-  constructor(private readonly config: Config) {}
+  constructor(private readonly runtime: Runtime) {}
 
   @Query(() => [ServerRuntimeConfigType], {
     description: 'get all server runtime configurable settings',
   })
   serverRuntimeConfig(): Promise<ServerRuntimeConfigType[]> {
-    return this.config.runtime.list();
+    return this.runtime.list();
   }
 
   @Mutation(() => ServerRuntimeConfigType, {
@@ -200,7 +268,7 @@ export class ServerRuntimeConfigResolver {
     @Args('id') id: string,
     @Args({ type: () => GraphQLJSON, name: 'value' }) value: any
   ): Promise<ServerRuntimeConfigType> {
-    return await this.config.runtime.set(id as any, value);
+    return await this.runtime.set(id as any, value);
   }
 
   @Mutation(() => [ServerRuntimeConfigType], {
@@ -211,7 +279,7 @@ export class ServerRuntimeConfigResolver {
   ): Promise<ServerRuntimeConfigType[]> {
     const keys = Object.keys(updates);
     const results = await Promise.all(
-      keys.map(key => this.config.runtime.set(key as any, updates[key]))
+      keys.map(key => this.runtime.set(key as any, updates[key]))
     );
 
     return results;
@@ -261,7 +329,7 @@ export class ServerServiceConfigResolver {
   }
 
   database(): ServerDatabaseConfig {
-    const url = new URL(this.config.database.datasourceUrl);
+    const url = new URL(this.config.prisma.datasourceUrl);
 
     return {
       host: url.hostname,

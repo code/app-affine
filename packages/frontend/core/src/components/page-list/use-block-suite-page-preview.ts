@@ -1,13 +1,13 @@
-import type { Doc } from '@blocksuite/store';
+import type { Store } from '@blocksuite/affine/store';
 import type { Atom } from 'jotai';
 import { atom } from 'jotai';
 
 const MAX_PREVIEW_LENGTH = 150;
 const MAX_SEARCH_BLOCK_COUNT = 30;
 
-const weakMap = new WeakMap<Doc, Atom<string>>();
+const weakMap = new WeakMap<Store, Atom<string>>();
 
-export const getPagePreviewText = (page: Doc) => {
+export const getPagePreviewText = (page: Store) => {
   const pageRoot = page.root;
   if (!pageRoot) {
     return '';
@@ -60,7 +60,7 @@ export const getPagePreviewText = (page: Doc) => {
 
 const emptyAtom = atom<string>('');
 
-export function useBlockSuitePagePreview(page: Doc | null): Atom<string> {
+export function useBlockSuitePagePreview(page: Store | null): Atom<string> {
   if (page === null) {
     return emptyAtom;
   } else if (weakMap.has(page)) {
@@ -69,16 +69,16 @@ export function useBlockSuitePagePreview(page: Doc | null): Atom<string> {
     const baseAtom = atom<string>('');
     baseAtom.onMount = set => {
       const disposables = [
-        page.slots.ready.on(() => {
+        page.slots.ready.subscribe(() => {
           set(getPagePreviewText(page));
         }),
-        page.slots.blockUpdated.on(() => {
+        page.slots.blockUpdated.subscribe(() => {
           set(getPagePreviewText(page));
         }),
       ];
       set(getPagePreviewText(page));
       return () => {
-        disposables.forEach(disposable => disposable.dispose());
+        disposables.forEach(disposable => disposable.unsubscribe());
       };
     };
     weakMap.set(page, baseAtom);

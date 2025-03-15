@@ -1,14 +1,14 @@
 import { DebugLogger } from '@affine/debug';
-import { DisposableGroup } from '@blocksuite/global/utils';
-import type { Doc, DocCollection } from '@blocksuite/store';
+import { DisposableGroup } from '@blocksuite/affine/global/disposable';
+import type { Store, Workspace } from '@blocksuite/affine/store';
 import { useEffect, useState } from 'react';
 
 const logger = new DebugLogger('useBlockSuiteWorkspacePage');
 
 export function useDocCollectionPage(
-  docCollection: DocCollection,
+  docCollection: Workspace,
   pageId: string | null
-): Doc | null {
+): Store | null {
   const [page, setPage] = useState(
     pageId ? docCollection.getDoc(pageId) : null
   );
@@ -16,14 +16,14 @@ export function useDocCollectionPage(
   useEffect(() => {
     const group = new DisposableGroup();
     group.add(
-      docCollection.slots.docAdded.on(id => {
+      docCollection.slots.docCreated.subscribe(id => {
         if (pageId === id) {
           setPage(docCollection.getDoc(id));
         }
       })
     );
     group.add(
-      docCollection.slots.docRemoved.on(id => {
+      docCollection.slots.docRemoved.subscribe(id => {
         if (pageId === id) {
           setPage(null);
         }

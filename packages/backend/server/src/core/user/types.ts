@@ -7,7 +7,7 @@ import {
 } from '@nestjs/graphql';
 import type { User } from '@prisma/client';
 
-import type { Payload } from '../../fundamentals/event/def';
+import { PublicUser, WorkspaceUser } from '../../models';
 import { type CurrentUser } from '../auth/session';
 
 @ObjectType()
@@ -41,6 +41,38 @@ export class UserType implements CurrentUser {
     nullable: true,
   })
   createdAt?: Date | null;
+
+  @Field(() => Boolean, {
+    description: 'User is disabled',
+  })
+  disabled!: boolean;
+}
+
+@ObjectType()
+export class PublicUserType implements PublicUser {
+  @Field()
+  id!: string;
+
+  @Field()
+  name!: string;
+
+  @Field(() => String, { nullable: true })
+  avatarUrl!: string | null;
+}
+
+@ObjectType()
+export class WorkspaceUserType implements WorkspaceUser {
+  @Field()
+  id!: string;
+
+  @Field()
+  name!: string;
+
+  @Field()
+  email!: string;
+
+  @Field(() => String, { nullable: true })
+  avatarUrl!: string | null;
 }
 
 @ObjectType()
@@ -90,12 +122,4 @@ export class ManageUserInput {
 
   @Field({ description: 'User name', nullable: true })
   name?: string;
-}
-
-declare module '../../fundamentals/event/def' {
-  interface UserEvents {
-    admin: {
-      created: Payload<{ id: string }>;
-    };
-  }
 }
